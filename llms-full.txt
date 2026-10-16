@@ -13,13 +13,15 @@ Every file linked from [llms.txt](llms.txt), inlined in the same order (director
 - .github/workflows/ci.yml (Build and run: .github/workflows/ci.yml)
 - .github/workflows/pages.yml (Build and run: .github/workflows/pages.yml)
 - .github/workflows/quality.yml (Build and run: .github/workflows/quality.yml)
+- .github/workflows/release.yml (Build and run: .github/workflows/release.yml)
 - Makefile (Build and run: Makefile)
-- results/perf.md (Optional: results/perf.md)
-- results/poly.md (Optional: results/poly.md)
-- results/real-variants.md (Optional: results/real-variants.md)
-- results/real.md (Optional: results/real.md)
-- results/synth.md (Optional: results/synth.md)
+- results/perf.md (Optional: Squatch Tuner: CPU cost)
+- results/poly.md (Optional: Squatch Tuner: polyphonic accuracy)
+- results/real-variants.md (Optional: Squatch Tuner: real DI accuracy, configuration variants)
+- results/real.md (Optional: Squatch Tuner: real DI accuracy)
+- results/synth.md (Optional: Squatch Tuner: synthetic accuracy)
 - bench/ (Optional: bench/)
+- docs/ (Optional: docs/)
 - hosts/ (Optional: hosts/)
 - include/ (Optional: include/)
 - tests/ (Optional: tests/)
@@ -718,6 +720,262 @@ jobs:
 ```
 
 ================================================================================
+FILE: .github/workflows/release.yml    [Build and run: .github/workflows/release.yml]
+================================================================================
+
+```yaml
+# SPDX-License-Identifier: MIT
+# A release: pushing a signed tag v* builds, scans, checksums and attests the assets, and creates a DRAFT
+# GitHub release for the maintainer to publish. Nothing is published by this workflow.
+#
+#   source + web demo + Linux CLI (x86-64, arm64)  ->  macOS CLI  ->  sign (skipped until the Developer ID
+#   secrets exist)  ->  SHA256SUMS + build-provenance attestation + draft release
+#
+# The macOS CLI is ad-hoc signed until the secrets named in tools/release-signing are set in the
+# Environment `release`; then the `sign` job signs it with Developer ID (hardened runtime), notarizes and
+# verifies it. The attestation covers the final signed and notarized zip.
+# With none of them set that job skips signing, says so in its log and in the release notes. The Linux
+# binaries are not Apple-signed; they are covered by the checksums and the attestation.
+# Actions are pinned to full commit SHAs.
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  TAG: ${{ github.ref_name }}
+jobs:
+  verify-tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The tag is a signed tag that GitHub shows as Verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          [ "$(jq -r .object.type <<<"$ref")" = tag ] || { echo "::error::$TAG is a lightweight tag: create it with git tag -s"; exit 1; }
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .object.sha <<<"$ref")")
+          [ "$(jq -r .verification.verified <<<"$tag")" = true ] || {
+            echo "::error::$TAG is not verified: $(jq -r .verification.reason <<<"$tag")"; exit 1; }
+
+  source:
+    needs: verify-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exported files match EXPORTED
+        run: make verify-export
+      - name: gitleaks 8.30.1 (pinned release, checksum checked)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o gl.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gl.tgz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/gl" && tar -xzf gl.tgz -C "$RUNNER_TEMP/gl" gitleaks && rm gl.tgz
+          "$RUNNER_TEMP/gl/gitleaks" dir . --no-banner --redact
+      - name: The release scanner passes its own tests, then the tree is scanned
+        run: |
+          python3 tools/test-release-scan
+          python3 tools/test-release-signing
+          python3 tools/release-scan .
+      - name: Unit tests (ASan + UBSan) and host tests (TSan)
+        run: |
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          make test CXX=clang++
+      - name: The published tuner.wasm reads the test tones
+        run: node hosts/wasm/test/core.test.mjs docs/tuner.wasm
+      - name: Source archive and web demo
+        run: |
+          set -euo pipefail
+          python3 tools/release-scan docs
+          mkdir dist
+          git archive --format=tar.gz --prefix="squatch-tuner-${TAG#v}/" -o "dist/squatch-tuner-$TAG-source.tar.gz" "$GITHUB_SHA"
+          (cd docs && zip -X -q -r -9 "../dist/squatch-tuner-web-$TAG.zip" .)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: dist/*
+          if-no-files-found: error
+
+  cli-linux:
+    needs: verify-tag
+    strategy:
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: x86_64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: JACK headers (Ubuntu packages)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libjack-jackd2-dev
+      - name: Build squatch-tuner-live and squatch-tone, build paths mapped out
+        run: |
+          set -euo pipefail
+          make live CXX=g++ CXXFLAGS="-std=c++17 -O3 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -ffile-prefix-map=$PWD=."
+          python3 tools/release-scan build/squatch-tuner-live build/squatch-tone
+          file build/squatch-tuner-live
+          ./build/squatch-tuner-live --help 2>&1 | head -3 || true
+          d="squatch-tuner-live-$TAG-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$d"
+          cp build/squatch-tuner-live build/squatch-tone LICENSE "dist/$d/"
+          tar -C dist -czf "dist/$d.tar.gz" "$d"
+          rm -r "dist/$d"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  cli-macos:
+    needs: verify-tag
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: JACK (Homebrew; the CLI needs it installed to run)
+        run: brew install jack
+      - name: Build for Apple silicon, build paths mapped out (ad-hoc signed by the linker)
+        run: |
+          set -euo pipefail
+          jp=$(brew --prefix jack)
+          make live CXX=clang++ CXXFLAGS="-std=c++17 -O3 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -I$jp/include -L$jp/lib -ffile-prefix-map=$PWD=."
+          python3 tools/release-scan build/squatch-tuner-live build/squatch-tone
+          lipo -archs build/squatch-tuner-live
+          codesign --verify --strict build/squatch-tuner-live
+          mkdir -p stage
+          cp build/squatch-tuner-live build/squatch-tone LICENSE stage/
+          mkdir dist && ditto -c -k stage dist/cli-macos-unsigned.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos-unsigned
+          path: dist/cli-macos-unsigned.zip
+          if-no-files-found: error
+
+  # Signs, notarizes and verifies in the Environment `release`: it has a required reviewer (every run waits
+  # for the maintainer's approval) and only tag refs may use it. The certificate and the notarization key
+  # are that environment's secrets (tools/release-signing says which); with none of them set the ad-hoc
+  # build passes through, labelled as such. A temporary keychain holds the certificate and is deleted.
+  sign:
+    needs: cli-macos
+    runs-on: macos-15
+    environment: release
+    outputs:
+      signing: ${{ steps.check.outputs.signing }}
+    env:
+      MACOS_APP_CERT_P12: ${{ secrets.MACOS_APP_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-macos-unsigned
+      - name: Are the signing secrets set? (skips cleanly when none are)
+        id: check
+        run: |
+          rc=0; tools/release-signing check --github-output "$GITHUB_OUTPUT" || rc=$?
+          case $rc in 0) ;; 10) echo "::notice title=Signing skipped::No signing secrets: the macOS CLI is ad-hoc signed only. Set them in the Environment 'release'.";; *) exit "$rc";; esac
+      - name: Temporary keychain with the Developer ID Application certificate
+        if: steps.check.outputs.signing == 'yes'
+        run: tools/release-signing keychain
+      - name: Sign (hardened runtime, secure timestamp), notarize, verify
+        if: steps.check.outputs.signing == 'yes'
+        run: |
+          set -euo pipefail
+          mkdir stage && ditto -x -k cli-macos-unsigned.zip stage
+          # Homebrew's libjack is not signed by us, so the hardened runtime must allow loading it.
+          tools/release-signing sign --entitlements .github/release/cli.entitlements stage/squatch-tuner-live stage/squatch-tone
+          mkdir out
+          ditto -c -k stage "out/squatch-tuner-live-$TAG-macos-arm64.zip"
+          # A bare executable cannot carry a stapled ticket: Gatekeeper finds it online at first launch.
+          tools/release-signing notarize "out/squatch-tuner-live-$TAG-macos-arm64.zip"
+          tools/release-signing verify stage/squatch-tuner-live stage/squatch-tone
+      - name: Ad-hoc build passes through, named for what it is
+        if: steps.check.outputs.signing != 'yes'
+        run: |
+          mkdir out
+          cp cli-macos-unsigned.zip "out/squatch-tuner-live-$TAG-macos-arm64-adhoc-unsigned.zip"
+      - name: Delete the temporary keychain and key files
+        if: always()
+        run: tools/release-signing cleanup
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: [source, cli-linux, sign]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write       # the draft release
+      id-token: write       # the attestation's signing identity
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: '{source,cli-linux-*,cli-macos}'
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -l
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING: ${{ needs.sign.outputs.signing }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGNING" = yes ]; then
+            status="The macOS CLI is signed with Developer ID and notarized."
+          else
+            status="**The macOS CLI is ad-hoc signed and not notarized** (Developer ID certificates are not installed yet), so macOS will warn on first launch. This release is a draft until that is done."
+          fi
+          cat > notes.md <<NOTES
+          Squatch Tuner $TAG.
+
+          - \`squatch-tuner-$TAG-source.tar.gz\`: the source.
+          - \`squatch-tuner-web-$TAG.zip\`: the browser demo, the same files as the published demo page.
+          - \`squatch-tuner-live-$TAG-linux-x86_64.tar.gz\`, \`-linux-arm64.tar.gz\`, \`squatch-tuner-live-$TAG-macos-arm64*.zip\`: the headless tuner behind a JACK input, with \`squatch-tone\`, an exact test tone. They need a running JACK server.
+
+          $status
+
+          Verify what you downloaded:
+
+          \`\`\`sh
+          shasum -a 256 -c SHA256SUMS            # sha256sum -c on Linux
+          gh attestation verify FILE -R $GITHUB_REPOSITORY
+          \`\`\`
+
+          The tag $TAG is SSH-signed and shows Verified on GitHub. The attestation names this repository's release workflow and the tagged commit.
+          NOTES
+          flags=(--draft --verify-tag --title "Squatch Tuner $TAG" --notes-file notes.md)
+          case "$TAG" in *-*) flags+=(--prerelease);; esac
+          gh release create "$TAG" dist/* "${flags[@]}"
+```
+
+================================================================================
 FILE: Makefile    [Build and run: Makefile]
 ================================================================================
 
@@ -812,8 +1070,10 @@ clean:
 ```
 
 ================================================================================
-FILE: results/perf.md    [Optional: results/perf.md]
+FILE: results/perf.md    [Optional: Squatch Tuner: CPU cost]
 ================================================================================
+
+# Squatch Tuner: CPU cost
 
 | algorithm | ns/sample playing | of one core @48k | ns/sample quiet | of one core @48k |
 |---|---|---|---|---|
@@ -824,13 +1084,16 @@ FILE: results/perf.md    [Optional: results/perf.md]
 | MPM + phase vocoder | 490.5 | 2.35% | 7.3 | 0.04% |
 | Poly strum check (6 strings) | 27.1 | 0.13% | 26.8 | 0.13% |
 
-Object sizes (all of the memory, no heap): Tuner 128176 bytes, PolyTuner 233704 bytes, StrobeBank 116016 bytes, PartialChannel 14496 bytes.
+Object sizes (all of the memory, no heap): Tuner 128176 bytes, PolyTuner 233704 bytes,
+StrobeBank 116016 bytes, PartialChannel 14496 bytes.
 
 ================================================================================
-FILE: results/poly.md    [Optional: results/poly.md]
+FILE: results/poly.md    [Optional: Squatch Tuner: polyphonic accuracy]
 ================================================================================
 
-### Synthetic strums (300), error against the true pitch at that moment: RMS c (p95 |err|) [valid %]
+# Squatch Tuner: polyphonic accuracy
+
+## Synthetic strums (300), error against the true pitch at that moment: RMS c (p95 |err|) [valid %]
 
 | string | 250 ms | 500 ms | 1000 ms |
 |---|---|---|---|
@@ -841,7 +1104,9 @@ FILE: results/poly.md    [Optional: results/poly.md]
 | B3 | 7.97 (16.69) [85%] | 6.40 (12.86) [81%] | 6.72 (19.86) [98%] |
 | E4 | 8.73 (17.81) [88%] | 8.40 (21.94) [84%] | 6.89 (18.28) [99%] |
 
-### Real strums (300), open strings from directinput_allsinglenotes.wav mixed with 0-40 ms spread and 0 to -6 dB levels:
+## Real strums (300)
+
+Open strings from directinput_allsinglenotes.wav mixed with 0-40 ms spread and 0 to -6 dB levels;
 poly reading minus the mono reading of the same pluck alone, RMS c (p95 |diff|) [valid %]
 
 | string | open-string pitch (mono, 1.2 s) | 250 ms | 500 ms | 1000 ms |
@@ -854,10 +1119,13 @@ poly reading minus the mono reading of the same pluck alone, RMS c (p95 |diff|) 
 | E4 | -1.8 c | 6.40 (13.63) [97%] | 6.04 (13.56) [95%] | 4.83 (10.80) [99%] |
 
 ================================================================================
-FILE: results/real-variants.md    [Optional: results/real-variants.md]
+FILE: results/real-variants.md    [Optional: Squatch Tuner: real DI accuracy, configuration variants]
 ================================================================================
 
-Real DI: 275 notes that ring at least 1.5 s, from 2 file(s); each algorithm runs continuously over the whole file; re-pitch test +7.0 c.
+# Squatch Tuner: real DI accuracy, configuration variants
+
+Real DI: 275 notes that ring at least 1.5 s, from 2 file(s); each algorithm runs continuously
+over the whole file; re-pitch test +7.0 c.
 
 | algorithm | notes | octave/gross slips | re-pitch error median c | abs p50 c | abs p95 c | jitter p50 c | stable ±1c p50/p90 ms | never | stable ±0.1c p50/p90 ms | never |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -883,10 +1151,13 @@ Pitch after the pluck relative to the settled pitch (1.0-1.5 s), Squatch strobe 
 | 750 ms | -1.77 | -0.17 | 1.59 |
 
 ================================================================================
-FILE: results/real.md    [Optional: results/real.md]
+FILE: results/real.md    [Optional: Squatch Tuner: real DI accuracy]
 ================================================================================
 
-Real DI: 275 notes that ring at least 1.5 s, from 2 file(s); each algorithm runs continuously over the whole file; re-pitch test +7.0 c.
+# Squatch Tuner: real DI accuracy
+
+Real DI: 275 notes that ring at least 1.5 s, from 2 file(s); each algorithm runs continuously
+over the whole file; re-pitch test +7.0 c.
 
 | algorithm | notes | octave/gross slips | re-pitch error median c | abs p50 c | abs p95 c | jitter p50 c | stable ±1c p50/p90 ms | never | stable ±0.1c p50/p90 ms | never |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -908,12 +1179,15 @@ Pitch after the pluck relative to the settled pitch (1.0-1.5 s), Squatch strobe 
 | 750 ms | -1.77 | -0.17 | 1.59 |
 
 ================================================================================
-FILE: results/synth.md    [Optional: results/synth.md]
+FILE: results/synth.md    [Optional: Squatch Tuner: synthetic accuracy]
 ================================================================================
 
-Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz input. Steady window 0.5-1.5 s after the pluck unless stated.
+# Squatch Tuner: synthetic accuracy
 
-### clean: harmonic, no glide, 60 dB SNR
+Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz input.
+Steady window 0.5-1.5 s after the pluck unless stated.
+
+## clean: harmonic, no glide, 60 dB SNR
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -927,7 +1201,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | 0.056 | 0.128 | 0.299 | 0.034 | 49 / 60 | 0% | 1447 / 1500 | 33% | 0.00% | 100% |
 | MPM (48k, median-5) | -0.002 | 0.032 | 0.072 | 0.026 | 39 / 65 | 0% | 65 / 1479 | 23% | 0.00% | 100% |
 
-#### Per note (clean): RMS steady error c / lock ±1 c p50 ms
+### Per note (clean): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -944,7 +1218,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | E5 | 1.820 / 52 | 0.704 / 543 | 0.039 / 12 | 0.000 / 20 | 0.000 / 20 | 0.000 / 20 | 0.000 / 20 | 0.121 / 44 | 0.011 / 7 |
 | E6 | 9.318 / - | 4.201 / 876 | 0.072 / 7 | 0.000 / 17 | 0.000 / 17 | 0.000 / 17 | 0.000 / 17 | 0.419 / 33 | 0.102 / 7 |
 
-### guitar: B 3e-5..3e-4, pluck/pickup comb, T60 3-8 s, 3 c glide, 60 dB SNR, pick noise
+## guitar: B 3e-5..3e-4, pluck/pickup comb, T60 3-8 s, 3 c glide, 60 dB SNR, pick noise
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -958,7 +1232,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | 1.068 | 1.306 | 2.395 | 0.257 | 911 / 1397 | 27% | 1484 / 1484 | 99% | 0.00% | 100% |
 | MPM (48k, median-5) | 0.996 | 1.233 | 2.346 | 0.255 | 892 / 1341 | 22% | - / - | 100% | 0.00% | 100% |
 
-#### Per note (guitar): RMS steady error c / lock ±1 c p50 ms
+### Per note (guitar): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -975,7 +1249,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | E5 | 3.246 / - | 1.395 / 361 | 0.019 / 361 | 0.041 / 337 | 0.188 / 465 | 1.319 / 983 | 0.188 / 465 | 1.759 / 908 | 1.622 / 817 |
 | E6 | 12.660 / - | 5.210 / - | 0.020 / 524 | 0.039 / 476 | 0.227 / 655 | 0.627 / 929 | 0.227 / 655 | 1.482 / 1148 | 1.046 / 1175 |
 
-### weak-fund: guitar with the fundamental 20 dB down
+## weak-fund: guitar with the fundamental 20 dB down
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -989,7 +1263,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | 98.879 | 314.740 | 1104.843 | 0.280 | 935 / 1291 | 41% | 1487 / 1493 | 98% | 8.05% | 100% |
 | MPM (48k, median-5) | 7.634 | 64.534 | 2.692 | 0.254 | 908 / 1278 | 27% | 1492 / 1498 | 98% | 0.49% | 100% |
 
-#### Per note (weak-fund): RMS steady error c / lock ±1 c p50 ms
+### Per note (weak-fund): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1006,7 +1280,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | E5 | 3.033 / - | 1.524 / 487 | 0.015 / 556 | 0.040 / 521 | 0.227 / 721 | 1.273 / 1036 | 0.227 / 721 | 1.478 / 993 | 1.365 / 908 |
 | E6 | 10.024 / - | 672.455 / 151 | 672.389 / 636 | 0.038 / 343 | 0.202 / 471 | 0.792 / 753 | 0.202 / 471 | 1.707 / 967 | 1.266 / 863 |
 
-### noisy: guitar at 30 dB SNR plus 60/180 Hz hum at -30 dB
+## noisy: guitar at 30 dB SNR plus 60/180 Hz hum at -30 dB
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -1020,7 +1294,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | -40.772 | 117.205 | 301.703 | 7.639 | 1495 / 1500 | 95% | - / - | 100% | 5.71% | 90% |
 | MPM (48k, median-5) | -11.618 | 55.768 | 82.177 | 2.404 | 1468 / 1500 | 71% | 1495 / 1499 | 97% | 1.34% | 92% |
 
-#### Per note (noisy): RMS steady error c / lock ±1 c p50 ms
+### Per note (noisy): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1037,7 +1311,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | E5 | 432.667 / - | 304.491 / 961 | 308.045 / 1471 | 0.045 / 391 | 0.208 / 540 | 0.784 / 519 | 0.208 / 540 | 241.034 / - | 1.289 / 1265 |
 | E6 | 10.081 / - | 5.116 / 247 | 0.714 / 1495 | 0.038 / 527 | 0.245 / 732 | 0.402 / 823 | 0.245 / 732 | 1.440 / 1497 | 0.844 / 1420 |
 
-### hard-pluck: guitar with a 15 cent pitch glide
+## hard-pluck: guitar with a 15 cent pitch glide
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -1051,7 +1325,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | 1.251 | 1.473 | 2.821 | 0.388 | 1265 / 1489 | 57% | - / - | 100% | 0.00% | 100% |
 | MPM (48k, median-5) | 1.148 | 1.381 | 2.799 | 0.359 | 1212 / 1479 | 56% | 1415 / 1415 | 99% | 0.00% | 100% |
 
-#### Per note (hard-pluck): RMS steady error c / lock ±1 c p50 ms
+### Per note (hard-pluck): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1068,7 +1342,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | E5 | 3.591 / - | 1.422 / 1356 | 0.057 / 833 | 0.200 / 868 | 0.977 / 1015 | 1.136 / 911 | 0.977 / 1015 | 1.610 / 999 | 1.431 / 935 |
 | E6 | 12.102 / - | 6.107 / 743 | 0.061 / 959 | 0.203 / 833 | 0.940 / 1089 | 0.441 / 1073 | 0.940 / 1089 | 1.591 / 1191 | 1.112 / 1015 |
 
-### short: guitar with T60 0.6 s (dead string, high fret); window 0.25-0.5 s
+## short: guitar with T60 0.6 s (dead string, high fret); window 0.25-0.5 s
 
 | algorithm | bias c | RMS c | p95 abs c | jitter c | lock ±1c p50/p90 ms | never ±1c | lock ±0.1c p50/p90 ms | never ±0.1c | gross >50c | coverage |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -1082,7 +1356,7 @@ Synthetic matrix: 12 notes E1..E6 x 8 trials, detune uniform ±50 c, 48 kHz inpu
 | YIN (48k, median-5) | 2.036 | 3.048 | 6.704 | 0.755 | 188 / 439 | 66% | 415 / 421 | 98% | 0.20% | 74% |
 | MPM (48k, median-5) | 0.804 | 1.081 | 2.388 | 0.569 | 156 / 441 | 55% | 417 / 441 | 94% | 0.00% | 74% |
 
-#### Per note (short): RMS steady error c / lock ±1 c p50 ms
+### Per note (short): RMS steady error c / lock ±1 c p50 ms
 
 | note | YIN (12k, median-5) | MPM (12k, median-5) | MPM + phase vocoder | Squatch strobe (hz, now) | Squatch strobe (steadyHz) | Squatch strobe, no B fit | Squatch strobe, line fit only | YIN (48k, median-5) | MPM (48k, median-5) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1108,14 +1382,43 @@ Directory listing (tracked files):
 - bench/algos.hpp
 - bench/eval_poly.cpp
 - bench/eval_real.cpp
+- bench/eval_stability.cpp
 - bench/eval_synth.cpp
 - bench/measure.hpp
 - bench/onsets.hpp
 - bench/perf.cpp
 - bench/poly_real.cpp
 - bench/pv.cpp
+- bench/stability.hpp
 - bench/synth.hpp
 - bench/wav.hpp
+
+================================================================================
+FILE: docs/    [Optional: docs/]
+================================================================================
+
+Directory listing (tracked files):
+
+- docs/demo.css
+- docs/demo.js
+- docs/favicon.svg
+- docs/hold.js
+- docs/index.html
+- docs/screens/demo-a2-in-tune-desktop-dark.jpg
+- docs/screens/demo-a2-in-tune-desktop-light.jpg
+- docs/screens/demo-a2-in-tune-phone-dark.jpg
+- docs/screens/demo-a2-in-tune-phone-light.jpg
+- docs/screens/demo-a2-plus7-desktop-dark.jpg
+- docs/screens/demo-a2-plus7-desktop-light.jpg
+- docs/screens/demo-a2-plus7-phone-dark.jpg
+- docs/screens/demo-a2-plus7-phone-light.jpg
+- docs/screens/demo-idle-desktop-light.jpg
+- docs/strobe.js
+- docs/tokens.css
+- docs/tuner-view.js
+- docs/tuner.css
+- docs/tuner.wasm
+- docs/worklet.js
 
 ================================================================================
 FILE: hosts/    [Optional: hosts/]
@@ -1124,7 +1427,10 @@ FILE: hosts/    [Optional: hosts/]
 Directory listing (tracked files):
 
 - hosts/common/display.hpp
+- hosts/common/hold.hpp
+- hosts/common/ir_file.hpp
 - hosts/common/latest.hpp
+- hosts/common/tuner_frames.hpp
 - hosts/jack/jack_session.hpp
 - hosts/jack/tone.cpp
 - hosts/jack/tuner_live.cpp
@@ -1141,6 +1447,8 @@ Directory listing (tracked files):
 - hosts/wasm/tuner_wasm.cpp
 - hosts/wasm/worklet.js
 - hosts/web/favicon.svg
+- hosts/web/hold.js
+- hosts/web/hold.test.mjs
 - hosts/web/index.html
 - hosts/web/serve.py
 - hosts/web/strobe.js
@@ -1160,13 +1468,17 @@ Directory listing (tracked files):
 - include/squatch/tuner/decimator.hpp
 - include/squatch/tuner/history.hpp
 - include/squatch/tuner/level.hpp
+- include/squatch/tuner/mains.hpp
 - include/squatch/tuner/nco.hpp
 - include/squatch/tuner/partial_fit.hpp
 - include/squatch/tuner/period.hpp
 - include/squatch/tuner/phase_slope.hpp
 - include/squatch/tuner/poly.hpp
+- include/squatch/tuner/stiffness.hpp
 - include/squatch/tuner/strobe.hpp
+- include/squatch/tuner/successor.hpp
 - include/squatch/tuner/tuner.hpp
+- include/squatch/tuner/weak_start.hpp
 
 ================================================================================
 FILE: tests/    [Optional: tests/]
@@ -1184,4 +1496,8 @@ Directory listing (tracked files):
 
 - tools/export-public
 - tools/pr-shape
+- tools/release-scan
+- tools/release-signing
 - tools/requirements-ci.txt
+- tools/test-release-scan
+- tools/test-release-signing
