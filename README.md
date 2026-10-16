@@ -121,8 +121,9 @@ void audioCallback(const float* in, int n) {
 |---|---|
 | `hosts/wasm/` | the browser demo: the core compiled to WebAssembly (31 kB, no imports) in an AudioWorklet, echo cancellation, noise suppression and automatic gain off, readings to the page 30 times a second |
 | `hosts/web/` | the tuner page (strobe, needle, seals, A4 reference, light and dark themes, phone layout), and `serve.py`, a standard-library bridge that streams a live tuner to it |
-| `hosts/jack/` | `squatch-tuner-live`, the tuner behind a JACK input (the Pi 5 host in RESULTS.md), and `squatch-tone`, an exact test tone |
-| `hosts/common/` | what every host shares: note naming and the reading handoff |
+| `hosts/jack/` | `squatch-tuner-live`, the tuner behind a JACK input (Linux; the Pi 5 host in RESULTS.md), and `squatch-tone`, an exact test tone |
+| `hosts/coreaudio/` | the same two programs for macOS, on CoreAudio directly: no JACK, only system frameworks |
+| `hosts/common/` | what every host shares: note naming, the reading handoff, and the live tuner's real-time step and JSON line |
 
 ## Build and test
 
@@ -134,7 +135,7 @@ make test          # core tests (ASan + UBSan, including zero heap allocations i
 make all           # the tests and the bench programs
 make results       # every number in RESULTS.md, about 20 minutes; needs the Guitar-TECHS
                    # recordings: make results GUITAR_TECHS=/path/to/guitar-techs
-make live          # the JACK host (Linux, libjack-jackd2-dev)
+make live          # CoreAudio on macOS (nothing to install); JACK elsewhere (libjack-jackd2-dev)
 make demo          # the browser demo into build/web-demo (needs Emscripten)
 make demo-test     # the module in Node, then the page in headless Chrome against test tones
 make lint          # complexity limits (lizard)
@@ -143,6 +144,24 @@ make lint          # complexity limits (lizard)
 To run the demo locally, serve `docs/` over HTTPS or from `localhost`, which browsers also
 trust with a microphone: `python3 -m http.server -d docs 8000`, then open
 `http://localhost:8000/`.
+
+## Live on a Mac
+
+On macOS, `make live` builds `squatch-tuner-live` and `squatch-tone` on CoreAudio. They link system
+frameworks only, so a Mac needs nothing installed (no JACK); the options and the JSON lines are the
+JACK host's. Linux keeps JACK.
+
+```sh
+build/squatch-tuner-live --list-devices        # every device: channels, rate, which are the defaults
+build/squatch-tuner-live                       # the default input device, channel 1
+build/squatch-tuner-live --device umc --input 2   # a device by (part of) its name, channel 2
+build/squatch-tone 110 --device umc --port 1   # an exact tone on that device's output 1
+```
+
+The first run asks, once, whether your terminal may use the microphone. If that was refused the input is
+digital silence, and the tuner says so on stderr after two seconds. The programs use a device as it is: they
+never change the Mac's default devices, a buffer size or a sample rate. `--out thru` needs one device with both
+inputs and outputs (an interface).
 
 ## Where the code lives
 
