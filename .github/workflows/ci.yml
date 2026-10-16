@@ -31,3 +31,27 @@ jobs:
           make test CXX=clang++
       - name: The published tuner.wasm reads the test tones
         run: node hosts/wasm/test/core.test.mjs docs/tuner.wasm
+
+  # The CoreAudio host only builds on a Mac, so build it on every push and pull request: a break there would
+  # otherwise show up first in a release. Only system libraries may be linked. No audio input is used.
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the live tuner and tone on CoreAudio
+        run: make live CXX=clang++
+      - name: Only system libraries are linked
+        run: |
+          set -euo pipefail
+          for b in build/squatch-tuner-live build/squatch-tone; do
+            otool -L "$b"
+            bad=$(otool -L "$b" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/System/|/usr/lib/)' || true)
+            if [ -n "$bad" ]; then echo "::error::$b links a library that is not part of macOS: $bad"; exit 1; fi
+          done
+      - name: Lists the audio devices
+        run: |
+          set -euo pipefail
+          build/squatch-tuner-live --list-devices
+          build/squatch-tone --list-devices

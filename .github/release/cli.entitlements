@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- The CLI loads Homebrew's libjack, which we do not sign. -->
-  <key>com.apple.security.cs.disable-library-validation</key>
+  <!-- Under the hardened runtime, reading a microphone needs this. The CLI loads no library we do not sign. -->
+  <key>com.apple.security.device.audio-input</key>
   <true/>
 </dict>
 </plist>

@@ -10,7 +10,7 @@ BUILD := build
 
 BENCH_COMMON := bench/pv.cpp bench/poly_real.cpp
 HEADERS := $(wildcard include/squatch/tuner/*.hpp) $(wildcard bench/*.hpp)
-HOST_HEADERS := $(wildcard hosts/common/*.hpp) $(wildcard hosts/jack/*.hpp) include/squatch/dsp/latest.hpp
+HOST_HEADERS := $(wildcard hosts/common/*.hpp) $(wildcard hosts/jack/*.hpp) $(wildcard hosts/coreaudio/*.hpp) include/squatch/dsp/latest.hpp
 
 # The Guitar-TECHS single-note DI recordings (CC BY 4.0), downloaded separately: see RESULTS.md.
 GUITAR_TECHS ?= data/guitar-techs
@@ -36,19 +36,40 @@ $(BUILD)/test_hosts: hosts/tests/test_hosts.cpp $(HEADERS) $(HOST_HEADERS) | $(B
 $(BUILD):
 	mkdir -p $(BUILD)
 
-test: $(BUILD)/tests $(BUILD)/test_hosts
+# The CoreAudio host's audio path, offline: no audio device and no CoreAudio types, so it runs on any machine.
+$(BUILD)/test_host_audio: hosts/tests/test_host_audio.cpp $(HEADERS) $(HOST_HEADERS) | $(BUILD)
+	$(CXX) $(CXXFLAGS) -O1 -g -fsanitize=address,undefined -o $@ $< -lpthread
+
+test: $(BUILD)/tests $(BUILD)/test_hosts $(BUILD)/test_host_audio
 	./$(BUILD)/tests
 	./$(BUILD)/test_hosts
+	./$(BUILD)/test_host_audio
 
-# The live JACK host and its exact test tone (hosts/jack). Needs the JACK headers
-# (libjack-jackd2-dev on Debian and Ubuntu); not part of `all`.
+# The live tuner and its exact test tone. On macOS they use CoreAudio directly (hosts/coreaudio): only
+# system frameworks, nothing to install. Elsewhere they use JACK (hosts/jack), which needs its headers
+# (libjack-jackd2-dev on Debian and Ubuntu). `make live LIVE_BACKEND=jack` forces JACK on a Mac that has it.
+# Not part of `all`.
+ifeq ($(shell uname -s),Darwin)
+LIVE_BACKEND ?= coreaudio
+else
+LIVE_BACKEND ?= jack
+endif
+ifeq ($(LIVE_BACKEND),coreaudio)
+LIVE_LIBS := -framework CoreAudio -framework AudioToolbox -framework CoreFoundation -lpthread
+# The tuner reads a microphone: its Info.plist (embedded in the binary) carries the text macOS shows when
+# it asks, so a launch from anywhere but Terminal is asked instead of being killed.
+TUNER_LINK := -Wl,-sectcreate,__TEXT,__info_plist,hosts/coreaudio/Info.plist
+else
+LIVE_LIBS := -ljack -lpthread
+TUNER_LINK :=
+endif
 live: $(BUILD)/squatch-tuner-live $(BUILD)/squatch-tone
 
-$(BUILD)/squatch-tuner-live: hosts/jack/tuner_live.cpp $(HEADERS) $(HOST_HEADERS) | $(BUILD)
-	$(CXX) $(CXXFLAGS) -o $@ $< -ljack -lpthread
+$(BUILD)/squatch-tuner-live: hosts/$(LIVE_BACKEND)/tuner_live.cpp $(HEADERS) $(HOST_HEADERS) | $(BUILD)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LIVE_LIBS) $(TUNER_LINK)
 
-$(BUILD)/squatch-tone: hosts/jack/tone.cpp $(HOST_HEADERS) | $(BUILD)
-	$(CXX) $(CXXFLAGS) -o $@ $< -ljack -lpthread
+$(BUILD)/squatch-tone: hosts/$(LIVE_BACKEND)/tone.cpp $(HOST_HEADERS) | $(BUILD)
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LIVE_LIBS)
 
 # The browser demo, built into build/web-demo (docs/ holds the published copy). Needs
 # Emscripten on PATH; demo-test also needs Node 22 and Chrome.

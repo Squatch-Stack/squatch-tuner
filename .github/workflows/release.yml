@@ -116,13 +116,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: JACK (Homebrew; the CLI needs it installed to run)
-        run: brew install jack
-      - name: Build for Apple silicon, build paths mapped out (ad-hoc signed by the linker)
+      - name: Build for Apple silicon on CoreAudio, build paths mapped out (ad-hoc signed by the linker)
         run: |
           set -euo pipefail
-          jp=$(brew --prefix jack)
-          make live CXX=clang++ CXXFLAGS="-std=c++17 -O3 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -I$jp/include -L$jp/lib -ffile-prefix-map=$PWD=."
+          make live CXX=clang++ CXXFLAGS="-std=c++17 -O3 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -ffile-prefix-map=$PWD=."
+          # The macOS CLI needs nothing installed: only system libraries may be linked.
+          for b in build/squatch-tuner-live build/squatch-tone; do
+            otool -L "$b"
+            bad=$(otool -L "$b" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/System/|/usr/lib/)' || true)
+            if [ -n "$bad" ]; then echo "::error::$b links a library that is not part of macOS: $bad"; exit 1; fi
+          done
           python3 tools/release-scan build/squatch-tuner-live build/squatch-tone
           lipo -archs build/squatch-tuner-live
           codesign --verify --strict build/squatch-tuner-live
@@ -171,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir stage && ditto -x -k cli-macos-unsigned.zip stage
-          # Homebrew's libjack is not signed by us, so the hardened runtime must allow loading it.
+          # The hardened runtime needs the audio-input entitlement for the tuner to hear a microphone.
           tools/release-signing sign --entitlements .github/release/cli.entitlements stage/squatch-tuner-live stage/squatch-tone
           mkdir out
           ditto -c -k stage "out/squatch-tuner-live-$TAG-macos-arm64.zip"
@@ -231,7 +234,7 @@ jobs:
 
           - \`squatch-tuner-$TAG-source.tar.gz\`: the source.
           - \`squatch-tuner-web-$TAG.zip\`: the browser demo, the same files as the published demo page.
-          - \`squatch-tuner-live-$TAG-linux-x86_64.tar.gz\`, \`-linux-arm64.tar.gz\`, \`squatch-tuner-live-$TAG-macos-arm64*.zip\`: the headless tuner behind a JACK input, with \`squatch-tone\`, an exact test tone. They need a running JACK server.
+          - \`squatch-tuner-live-$TAG-linux-x86_64.tar.gz\`, \`-linux-arm64.tar.gz\`, \`squatch-tuner-live-$TAG-macos-arm64*.zip\`: the headless tuner, with \`squatch-tone\`, an exact test tone. On Linux they need a running JACK server; the macOS build uses CoreAudio and needs nothing installed.
 
           $status
 
