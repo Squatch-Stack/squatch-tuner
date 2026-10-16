@@ -1,4 +1,4 @@
-# Written by tools/export-public from squatch-dsp at bf6bb05b5c06737445f125c3343245afaae8cc08.
+# Written by tools/export-public from squatch-dsp at 5c5c9d9c27e037652f018974e14c57b11768053e (hosts/jack/jack_session.hpp only).
 # Do not edit these files here: change them upstream and export again (see the README).
 de9ec875a3df8d6488afd6893577bd995198373ca2bd2152887dcc5008504dc2  RESULTS.md
 94b7020753515c516163468fd2b55406d1701c7ba032a8683073f6216598a8cc  bench/algos.hpp
@@ -39,7 +39,7 @@ c44ba12f19a44ba3c0b782f6a1564699f0ccd00275450e47c4c0f7221de8f1d2  docs/tuner.was
 b3665ead3181c6617fb86481539f3bcfc5d7620844488957daddfb9fbf507512  hosts/common/ir_file.hpp
 3d9b651e6176dbb3897a8cbc4febcd4e461602f5cba279e9e95a095337980a17  hosts/common/latest.hpp
 a02486cb10744347717cd51882c7ad6959139443c276532ffc69b454d949d5d6  hosts/common/tuner_frames.hpp
-844fe4841436643bc64a5bd8ea0c32602462373131e20958f298dddd9d6bde5d  hosts/jack/jack_session.hpp
+bfd7189893f32863cfdcdae2ca0a44638fb0893b7211aa6f400644f0336e5f40  hosts/jack/jack_session.hpp
 1b1ac06435467c26a930cb8a9f281586efa9996c76675ad114715b86e9855cef  hosts/jack/tone.cpp
 52aa713ec159261e2e2b0dd329a8aa55585cb2a7e098a3c80ade9f8f6350f5e9  hosts/jack/tuner_live.cpp
 8559c84df869cdaa5f4200d8503018fa9ba54208a164f9313bf2e3523676e17b  hosts/tests/test_hosts.cpp
