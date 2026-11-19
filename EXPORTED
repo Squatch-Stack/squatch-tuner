@@ -1,4 +1,4 @@
-# Written by tools/export-public from squatch-dsp at 4ce2afb79bed94dcfadd5e18afb4fa51cf8bd853.
+# Written by tools/export-public from squatch-dsp at 08c78d9826b3881618e0e5072a8023466501c6e3 (tools/release-scan, tools/release-signing, tools/test-release-scan, tools/test-release-signing, hosts/tests/test_host_audio.cpp only).
 # Do not edit these files here: change them upstream and export again (see the README).
 de9ec875a3df8d6488afd6893577bd995198373ca2bd2152887dcc5008504dc2  RESULTS.md
 94b7020753515c516163468fd2b55406d1701c7ba032a8683073f6216598a8cc  bench/algos.hpp
@@ -52,7 +52,7 @@ a02486cb10744347717cd51882c7ad6959139443c276532ffc69b454d949d5d6  hosts/common/t
 1b4b7b68affbd4395b7d1eb611b01b1220d4d090ab5fbc3ed3a866534a4beba7  hosts/jack/jack_session.hpp
 2489d436b9dee2e69eaa0816e8f1b9679eb7150ae8bb9877dc4f678ae4cf1a00  hosts/jack/tone.cpp
 601b67e21fab60418bfef5849dbfcefca32568861c90781eac54f9a1049ce70c  hosts/jack/tuner_live.cpp
-b6cc7da0e324458d7dbfa49f05b29d5d56b3ef9c9eaf0e6f4877fc6227dbe480  hosts/tests/test_host_audio.cpp
+1a09177a12b33926ebc06361436777a03f5d718f5a589ac3aaf5bad120ed55d7  hosts/tests/test_host_audio.cpp
 8559c84df869cdaa5f4200d8503018fa9ba54208a164f9313bf2e3523676e17b  hosts/tests/test_hosts.cpp
 0d8c6ad65e5ae06f9c8b1fcabf8270e783812f6d89076d0fab04a88247685a13  hosts/wasm/build.py
 22863bba7ba0ee81f6095f6e463926ddf3f545836a2bdd25565f8a63ab91c7c1  hosts/wasm/demo.css
@@ -98,7 +98,7 @@ cbe66e0adc53dcf976819861a1fc3aeb862ef1c839aa1f5916d1169bdc8630db  include/squatc
 818c8ee6462a64bff412e3cf2113d0cf92f3a5daefb8088655381e2111e15b54  results/synth.md
 2c724991273af88988ec5da7d76717814d829162e6d3680773dfa3eb48025d1b  tests/test_core.cpp
 ef551ef238d36f01bee7a4006ac35d8fff62f3a6211e25b4db043c80bcd40bed  tools/export-public
-27be201ebb49c36ae14442a8dd76cef12efeee46ea64e6e222769bc101a30b4a  tools/release-scan
-414c14c757ea09536eb85c185dcb3962b25aaba4d25b10530b24d2e1749b1c63  tools/release-signing
-9942263d376c55df83073aa9cfa635f3a736e0fc9874f043483f68bf3d544b07  tools/test-release-scan
-33543123a798b73c5f8eef54d1c0bf898414c711db587133120ab2001579b0cd  tools/test-release-signing
+62bc2ea583873f1861565ae353901133484f2e969c9d1cf17a5436ee76e28c9e  tools/release-scan
+d81bdd53b43004b098ececff18b2c4d4962323bd93df3a1f9fd63c49919fb8bb  tools/release-signing
+6b10083bcd8966fd94664b0838e912d5b3e4c2f80e0781b2188fd5b110e79f37  tools/test-release-scan
+38aa6eebe04ef498cc4ab9340d984c80202d21b25c13a315288b581bc57ac643  tools/test-release-signing
